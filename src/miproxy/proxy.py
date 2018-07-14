@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+import argparse
 from urlparse import urlparse, urlunparse, ParseResult
 from SocketServer import ThreadingMixIn
 from httplib import HTTPResponse
@@ -128,6 +129,8 @@ class UnsupportedSchemeException(Exception):
 class ProxyHandler(BaseHTTPRequestHandler):
 
     r = compile(r'http://[^/]+(/?.*)(?i)')
+    OVERRIDE_HOST = None
+    OVERRIDE_PORT = 80
 
     def __init__(self, request, client_address, server):
         self.is_connect = False
@@ -139,10 +142,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.hostname, self.port = self.path.split(':')
         else:
             u = urlparse(self.path)
-            if u.scheme != 'http':
+            if u.scheme not in ('http', ''):
                 raise UnsupportedSchemeException('Unknown scheme %s' % repr(u.scheme))
-            self.hostname = u.hostname
-            self.port = u.port or 80
+            self.hostname = self.OVERRIDE_HOST or u.hostname
+            self.port = self.OVERRIDE_PORT or u.port or 80
             self.path = urlunparse(
                 ParseResult(
                     scheme='',
@@ -314,15 +317,48 @@ class DebugInterceptor(RequestInterceptorPlugin, ResponseInterceptorPlugin):
             return data
 
 
-if __name__ == '__main__':
+def build_parser():
+    PARSER = argparse.ArgumentParser(description='')
+    # This is a top-level argument for backward compatability)
+    PARSER.add_argument('ca_file', type=str, help='Certificate file for HTTPS man in the middling', nargs='?')
+    PARSER.add_argument('--target-host', type=str, help='Send all requests to this host. My default look up.')
+    PARSER.add_argument('--target-port', type=int, help='Port to connect to')
+    PARSER.add_argument('--bind-host', type=str, help='Address to listen on', default='')
+    PARSER.add_argument('--bind-port', type=int, help='Port to listen on ', default=8000)
+
+    return PARSER
+
+
+def main():
+    args = build_parser().parse_args()
     proxy = None
-    if not argv[1:]:
-        proxy = AsyncMitmProxy()
-    else:
-        proxy = AsyncMitmProxy(ca_file=argv[1])
+    kwargs = {}
+    if args.ca_file:
+        kwargs[ca_file] = args.ca_file
+
+    kwargs['server_address'] = args.bind_host, args.bind_port
+
+    if args.target_host or args.target_port:
+
+        overrides = {}
+
+        if args.target_host:
+            overrides['OVERRIDE_HOST']=args.target_host
+
+        if args.target_port:
+            overrides['OVERRIDE_PORT']=args.target_port
+
+        kwargs['RequestHandlerClass'] = type(
+            'RuntimeProxyHandler',
+            (ProxyHandler, object),
+            overrides)
+
+    proxy = AsyncMitmProxy(**kwargs)
     proxy.register_interceptor(DebugInterceptor)
     try:
         proxy.serve_forever()
     except KeyboardInterrupt:
         proxy.server_close()
 
+if __name__ == '__main__':
+    main()
